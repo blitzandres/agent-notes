@@ -21,7 +21,7 @@ class FakeHTMLRewriter {
 globalThis.HTMLRewriter = FakeHTMLRewriter;
 
 const here = new URL('.', import.meta.url).pathname;
-const MIGRATION = [here + '../migrations/0001_agent_notes.sql'];
+const MIGRATION = [here + '../migrations/0001_agent_notes.sql', here + '../migrations/0002_enhancements.sql'];
 
 const UA = {
   browser: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 Safari/605.1.15',

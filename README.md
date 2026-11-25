@@ -221,3 +221,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 [MIT](LICENSE) — Built by Andrés Blitz · [andresblitz.com](https://andresblitz.com)
+
+---
+
+## New in `feat/agent-standards-and-verification`
+
+- **Expanded AI bot detection (`src/bots.js`):** Added modern 2025–2026 AI agents & search crawlers from `ai-robots-txt/ai.robots.txt` (`ChatGPT Agent`, `Operator`, `Claude-Agent`, `Claude-Code`, `GrokBot`, `xAI-Grok`, `DeepSeekBot`, `MistralAI-Index`, `Manus-User`, `AmazonBuyForMe`, etc.) with operator/role metadata while keeping search crawlers and browsers byte-identical.
+- **RFC 9421 Web Bot Auth verification (`src/web-bot-auth.js`):** Verifies `Signature`, `Signature-Input`, and `Signature-Agent` Ed25519 signatures against the caller's HTTPS JWKS directory / Signature Agent Card (`auth_method = "web-bot-auth"`). Fails open if unsigned.
+- **Signed receipts, heuristic risk scoring & multi-error feedback (`src/receipts.js`):** Returns a structured receipt (`receipt_id`, optional HMAC `receipt_sig`, `spam_score`, `flags`), flags accidental emails/phones/tokens/URL bursts for safe owner triage, and returns all validation errors with a `hint` in one response.
+- **A2A Agent Card + stateless MCP endpoint (`src/discovery.js`):** Serves `GET /.well-known/agent-card.json` (identical for all callers) and `POST /mcp` (`leave_agent_note`, `get_agent_guidance`, `list_public_pages`).
+- **Owner Digest API (`GET /api/agent-notes/digest`):** Bearer-protected JSON and Markdown digest grouped by page and auth method, explicitly marking visitor note text as untrusted data.
