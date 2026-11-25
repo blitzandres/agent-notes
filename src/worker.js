@@ -1,81 +1,21 @@
 /**
- * agent-notes — pass-through Cloudflare Worker for AI agent interaction, attribution, and private notes.
+ * agent-notes — pass-through Cloudflare Worker for AI agent interaction, verification, discovery, and private notes.
  *
- * - Every request defaults to fetch(request), unchanged. Any internal error falls back to pass-through (fail open).
+ * - Every normal page request defaults to fetch(request), unchanged (fail-open).
  * - Search crawlers (Googlebot, Bingbot, Applebot, ...) and human browsers receive byte-identical origin responses.
- * - /agent-note accepts short, optional notes from AI agents (GET explainer or GET/POST submission; X-Robots-Tag: noindex).
- * - Raw IPs never leave the Worker; rate limiting uses the first 16 hex chars of HMAC-SHA256(ip, IP_SALT).
+ * - /agent-note accepts short notes with optional RFC 9421 Web Bot Auth verification and signed receipts.
+ * - /.well-known/agent-card.json (A2A) and POST /mcp provide standardized agent discovery & tool access.
  */
 
 import {
   NOTE_PATHS, REF_RE, handleAgentNote, tagForAiBot, detectAiReferral, sendEvent, siteOrigin,
 } from './agent-features.js';
-import { buildAgentFeaturesSummary, runRetention, timingSafeEqualStr } from './storage.js';
+import { BOTS, REDIRECT_RE, NEVER_REDIRECT_RE, classifyBot, getBotMeta } from './bots.js';
+import { buildAgentFeaturesSummary, buildNotesDigest, runRetention, timingSafeEqualStr } from './storage.js';
+import { handleAgentCard, handleMcpRequest } from './discovery.js';
 
 export * from './agent-features.js';
-
-export const BOTS = [
-  ['OAI-SearchBot', /oai-searchbot/i],
-  ['ChatGPT-User', /chatgpt-user/i],
-  ['GPTBot', /gptbot/i],
-  ['Claude-SearchBot', /claude-searchbot/i],
-  ['Claude-User', /claude-user/i],
-  ['ClaudeBot', /claudebot/i],
-  ['anthropic-ai', /anthropic-ai/i],
-  ['Perplexity-User', /perplexity-user/i],
-  ['PerplexityBot', /perplexitybot/i],
-  ['Google-Extended', /google-extended/i],
-  ['Google-CloudVertexBot', /google-cloudvertexbot/i],
-  ['GoogleOther', /googleother/i],
-  ['Googlebot', /googlebot/i],
-  ['Google-InspectionTool', /google-inspectiontool/i],
-  ['Bingbot', /bingbot/i],
-  ['Applebot-Extended', /applebot-extended/i],
-  ['Applebot', /applebot/i],
-  ['Amazonbot', /amazonbot/i],
-  ['Meta-ExternalAgent', /meta-externalagent/i],
-  ['Meta-ExternalFetcher', /meta-externalfetcher/i],
-  ['FacebookBot', /facebookbot/i],
-  ['facebookexternalhit', /facebookexternalhit/i],
-  ['Bytespider', /bytespider/i],
-  ['CCBot', /ccbot/i],
-  ['cohere-ai', /cohere-ai|cohere-training-data-crawler/i],
-  ['DuckAssistBot', /duckassistbot/i],
-  ['DuckDuckBot', /duckduckbot/i],
-  ['YandexBot', /yandex(bot|images|mobilebot|accessibilitybot)/i],
-  ['Baiduspider', /baiduspider/i],
-  ['PetalBot', /petalbot/i],
-  ['Diffbot', /diffbot/i],
-  ['MistralAI-User', /mistralai-user/i],
-  ['YouBot', /youbot/i],
-  ['AI2Bot', /ai2bot/i],
-  ['Timpibot', /timpibot/i],
-  ['ImagesiftBot', /imagesiftbot/i],
-  ['Omgilibot', /omgili/i],
-  ['Twitterbot', /twitterbot/i],
-  ['Slackbot', /slackbot/i],
-  ['LinkedInBot', /linkedinbot/i],
-  ['Discordbot', /discordbot/i],
-  ['WhatsApp', /whatsapp/i],
-  ['TelegramBot', /telegrambot/i],
-  ['SemrushBot', /semrushbot/i],
-  ['AhrefsBot', /ahrefsbot/i],
-  ['DataForSeoBot', /dataforseobot/i],
-  ['MJ12bot', /mj12bot/i],
-];
-
-const REDIRECT_RE = /gptbot|claudebot|anthropic-ai|perplexitybot|ccbot|bytespider|amazonbot/i;
-const NEVER_REDIRECT_RE = /googlebot|google-|bingbot|bingpreview|facebookexternalhit|twitterbot|slackbot|linkedinbot|discordbot|whatsapp|telegrambot|embedly|skypeuripreview|iframely|redditbot|pinterest/i;
-const GENERIC_RE = /([a-z0-9][a-z0-9._-]{0,40}(?:bot|crawler|spider))/i;
-
-export function classifyBot(ua) {
-  if (!ua) return null;
-  for (const [name, re] of BOTS) if (re.test(ua)) return name;
-  if (/cubot/i.test(ua)) return null;
-  const m = ua.match(GENERIC_RE);
-  if (m) return 'other:' + m[1].toLowerCase().slice(0, 40);
-  return null;
-}
+export { BOTS, classifyBot, getBotMeta };
 
 export function shouldRedirect(request, ua, env) {
   if (String(env && env.REDIRECT_ENABLED).toLowerCase() !== 'true') return false;
@@ -154,10 +94,14 @@ export function sideEvents(request, res, bot) {
   return out;
 }
 
-async function handleSummaryApi(request, env) {
+async function isReadAuthorized(request, env) {
   const auth = request.headers.get('authorization') || '';
   const tok = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-  if (!env || !env.READ_TOKEN || !tok || !(await timingSafeEqualStr(tok, env.READ_TOKEN))) {
+  return !!(env && env.READ_TOKEN && tok && (await timingSafeEqualStr(tok, env.READ_TOKEN)));
+}
+
+async function handleSummaryApi(request, env) {
+  if (!(await isReadAuthorized(request, env))) {
     return new Response(JSON.stringify({ error: 'unauthorized' }), {
       status: 401,
       headers: { 'content-type': 'application/json; charset=utf-8', 'x-robots-tag': 'noindex, nofollow' },
@@ -179,6 +123,37 @@ async function handleSummaryApi(request, env) {
   });
 }
 
+async function handleDigestApi(request, env) {
+  if (!(await isReadAuthorized(request, env))) {
+    return new Response(JSON.stringify({ error: 'unauthorized' }), {
+      status: 401,
+      headers: { 'content-type': 'application/json; charset=utf-8', 'x-robots-tag': 'noindex, nofollow' },
+    });
+  }
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'D1 database (DB) not bound' }), {
+      status: 503,
+      headers: { 'content-type': 'application/json; charset=utf-8', 'x-robots-tag': 'noindex, nofollow' },
+    });
+  }
+  const url = new URL(request.url);
+  const hours = url.searchParams.get('hours')
+    ? Math.min(720, Math.max(1, Number(url.searchParams.get('hours')) || 24))
+    : Math.min(90, Math.max(1, Number(url.searchParams.get('days')) || 1)) * 24;
+  const now = Date.now();
+  const digest = await buildNotesDigest(env, now - hours * 3600000, now + 1);
+  if (url.searchParams.get('format') === 'markdown') {
+    return new Response(digest.markdown, {
+      status: 200,
+      headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'no-store', 'x-robots-tag': 'noindex, nofollow' },
+    });
+  }
+  return new Response(JSON.stringify({ hours, ...digest }), {
+    status: 200,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-robots-tag': 'noindex, nofollow' },
+  });
+}
+
 export default {
   async fetch(request, env, ctx) {
     let bot = null, redirect = false, ua = '', pathname = '';
@@ -194,6 +169,15 @@ export default {
 
     if (pathname === '/api/agent-notes/summary' && request.method.toUpperCase() === 'GET') {
       return await handleSummaryApi(request, env);
+    }
+    if (pathname === '/api/agent-notes/digest' && request.method.toUpperCase() === 'GET') {
+      return await handleDigestApi(request, env);
+    }
+    if (pathname === '/.well-known/agent-card.json') {
+      return handleAgentCard(request, env);
+    }
+    if (pathname === '/mcp' || pathname === '/mcp/') {
+      return await handleMcpRequest(request, env, bot, buildPayload);
     }
 
     if (NOTE_PATHS.has(pathname)) {

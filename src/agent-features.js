@@ -2,26 +2,21 @@
  * Core edge agent features (fail-open; humans and search crawlers always get the origin response untouched).
  *
  * 1) /agent-note        — GET: plain-text explainer; GET ?agent=...&purpose=... or POST: short note (<=500 chars).
- *                          Always X-Robots-Tag: noindex, nofollow. Stores directly in D1 (env.DB) or forwards to ANALYTICS_URL.
- * 2) Tracking links     — Only for AI-only crawlers (GPTBot, ClaudeBot, CCBot, PerplexityBot, ...): internal links in HTML
- *                          and /AGENTS.md get ?ref=<tag>. Search crawlers (Googlebot, Bingbot, Applebot, ...) and
- *                          humans are never tagged. Later requests carrying a known tag log a reuse event.
- * 3) AI referrals       — Human (non-bot) HTML page views whose Referer host or utm_source is an AI assistant are
- *                          logged as (source, landing path, via) aggregates. Read-only: response untouched.
+ *                          Always X-Robots-Tag: noindex, nofollow. Supports Web Bot Auth signatures & signed receipts.
+ * 2) Tracking links     — Only for AI-only crawlers: internal links in HTML and /AGENTS.md get ?ref=<tag>.
+ *                          Search crawlers (Googlebot, Bingbot, Applebot, ...) and humans are never tagged.
+ * 3) AI referrals       — Human HTML page views whose Referer host or utm_source is an AI assistant are aggregated.
  */
 
 import { saveAgentNote, saveEdgeEvent, REF_TAG_RE, aiSourceOfHost } from './storage.js';
+import { AI_TAG_RE, NEVER_TAG_RE } from './bots.js';
+import { verifyWebBotAuth } from './web-bot-auth.js';
+import { validateNoteInput } from './receipts.js';
 
-export { REF_TAG_RE as REF_RE };
+export { REF_TAG_RE as REF_RE, AI_TAG_RE, NEVER_TAG_RE };
 export const NOTE_PATHS = new Set(['/agent-note', '/agent-note/']);
 export const NOTE_MAX_CHARS = 500;
 export const NOTE_MAX_BYTES = 2048;
-
-// AI-only crawlers / agents that may receive ?ref= tagged internal links.
-export const AI_TAG_RE = /gptbot|chatgpt-user|oai-searchbot|claudebot|claude-user|claude-searchbot|anthropic-ai|perplexitybot|perplexity-user|ccbot|bytespider|amazonbot|meta-externalagent|meta-externalfetcher|cohere-ai|cohere-training-data-crawler|diffbot|mistralai-user|youbot|ai2bot|timpibot|duckassistbot|imagesiftbot|omgili/i;
-
-// Never tagged (and never store GET /agent-note?agent= crawls), even if UA also contains an AI token.
-export const NEVER_TAG_RE = /googlebot|google-|googleother|adsbot|mediapartners|bingbot|bingpreview|msnbot|adidxbot|applebot|petalbot|duckduckbot|yandex|baiduspider|slurp|seznambot|naver|yeti|sogou|qwantify|qwantbot|mojeek|ecosia|exabot|facebookexternalhit|twitterbot|slackbot|linkedinbot|discordbot|whatsapp|telegrambot|embedly|skypeuripreview|iframely|redditbot|pinterest|semrush|ahrefs|dataforseo|mj12bot/i;
 
 const UTM_ALIASES = {
   chatgpt: 'chatgpt', openai: 'chatgpt', perplexity: 'perplexity', gemini: 'gemini', bard: 'gemini', copilot: 'copilot',
@@ -56,7 +51,6 @@ export function aiSourceFromUtm(v) {
   return UTM_ALIASES[v] || null;
 }
 
-/** Returns { source, via } for an AI-assistant referral, or null. Pure read of the request. */
 export function detectAiReferral(request) {
   const url = new URL(request.url);
   const ref = request.headers.get('referer') || '';
@@ -89,7 +83,6 @@ export function newTag() {
   return s;
 }
 
-/** Is an href internal to the configured site (relative, root-relative, or absolute on SITE_ORIGIN)? */
 export function isInternalHref(href, env) {
   href = String(href || '').trim();
   if (!href || href[0] === '#' || href.startsWith('?')) return false;
@@ -111,7 +104,6 @@ export function addRef(href, tag) {
   return base + (base.includes('?') ? '&' : '?') + 'ref=' + tag + frag;
 }
 
-/** Tag site links inside Markdown/plain text (AGENTS.md). */
 export function tagMarkdown(text, tag, env) {
   const host = siteHost(env).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const urlRe = new RegExp(`https?:\\/\\/(?:www\\.)?${host}(?:\\/[^\\s)\\]>"'\`<]*)?`, 'gi');
@@ -134,10 +126,6 @@ function taggedHeaders(res, request, env) {
   return h;
 }
 
-/**
- * For AI-only crawlers: returns { response, tag, kind } with tagged internal links, or null (= serve original).
- * Never throws; never called for search crawlers or humans.
- */
 export async function tagForAiBot(request, res, ua, env) {
   try {
     if (String(env && env.TAG_LINKS_ENABLED).toLowerCase() !== 'true') return null;
@@ -188,7 +176,7 @@ const NOTE_BASE_HEADERS = {
   'x-robots-tag': 'noindex, nofollow',
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, POST, OPTIONS',
-  'access-control-allow-headers': 'content-type',
+  'access-control-allow-headers': 'content-type, signature, signature-input, signature-agent',
   'access-control-max-age': '86400',
 };
 
@@ -222,8 +210,10 @@ export function buildNoteHelp(env) {
     '  Content-Type: application/x-www-form-urlencoded   agent=...&purpose=...&note=...&page=...',
     '  Content-Type: text/plain         body: your note',
     '',
+    'Discovery: /.well-known/agent-card.json (A2A) · /mcp (MCP JSON-RPC) · /AGENTS.md · /llms.txt',
+    'Auth: Optional RFC 9421 Web Bot Auth (Signature, Signature-Input, Signature-Agent) is verified automatically.',
     'Limits: 500 characters for agent + purpose + note combined, 2 KB per request, a few notes per hour per client.',
-    'Responses: 201 saved · 400 empty/invalid · 413 too long · 429 slow down · 503 try later.',
+    'Responses: 201 saved (with receipt) · 400 empty/invalid · 413 too long · 429 slow down · 503 try later.',
     'Notes are read privately by the site owner; they are not published.',
     '',
   ].join('\n');
@@ -278,9 +268,12 @@ export async function handleAgentNote(request, env, bot, buildPayload) {
   if (m !== 'GET' && m !== 'POST') return noteResp({ error: 'method not allowed' }, 405, { allow: 'GET, POST, OPTIONS' });
 
   const asText = m === 'GET';
-  const fail = (status, error) => (asText ? noteResp(error + '\n', status) : noteResp({ error }, status));
+  const fail = (status, errObj) =>
+    asText ? noteResp((errObj.error || 'invalid') + '\n', status) : noteResp(errObj, status);
+
   let fields = { agent: q.get('agent'), purpose: q.get('purpose'), note: q.get('note') };
   let page = q.get('page');
+  let typeInvalid = false;
 
   if (m === 'POST') {
     const len = Number(request.headers.get('content-length') || 0);
@@ -290,10 +283,14 @@ export async function handleAgentNote(request, env, bot, buildPayload) {
     const ct = (request.headers.get('content-type') || '').toLowerCase();
     if (ct.includes('application/json')) {
       let o;
-      try { o = JSON.parse(raw); } catch { return noteResp({ error: 'bad json' }, 400); }
-      if (!o || typeof o !== 'object' || Array.isArray(o)) return noteResp({ error: 'expected {"agent","purpose","note","page"}' }, 400);
+      try { o = JSON.parse(raw); } catch {
+        return noteResp({ error: 'bad json', hint: 'Send valid JSON: {"agent":"...","purpose":"...","page":"/..."}' }, 400);
+      }
+      if (!o || typeof o !== 'object' || Array.isArray(o)) {
+        return noteResp({ error: 'expected {"agent","purpose","note","page"}' }, 400);
+      }
       const f = { agent: strOrNull(o.agent), purpose: strOrNull(o.purpose), note: strOrNull(o.note) };
-      if (Object.values(f).some((v) => v === undefined)) return noteResp({ error: 'agent, purpose and note must be strings' }, 400);
+      if (Object.values(f).some((v) => v === undefined)) typeInvalid = true;
       fields = { agent: f.agent ?? fields.agent, purpose: f.purpose ?? fields.purpose, note: f.note ?? fields.note };
       if (typeof o.page === 'string') page = o.page;
     } else if (ct.includes('application/x-www-form-urlencoded')) {
@@ -305,13 +302,17 @@ export async function handleAgentNote(request, env, bot, buildPayload) {
     }
   }
 
-  const note = composeNote(fields);
-  if (!note) return fail(400, 'empty note');
-  if (note.length > NOTE_MAX_CHARS) {
-    return asText
-      ? noteResp(`note too long (max ${NOTE_MAX_CHARS} characters)\n`, 413)
-      : noteResp({ error: 'note too long', max_chars: NOTE_MAX_CHARS }, 413);
+  const note = composeNote(typeInvalid ? {} : fields);
+  const validationErr = validateNoteInput({
+    note,
+    maxChars: NOTE_MAX_CHARS,
+    fields: typeInvalid ? { bad: undefined } : null,
+  });
+  if (validationErr) {
+    const status = validationErr.errors.some((e) => e.code === 'too_long') && !typeInvalid ? 413 : 400;
+    return fail(status, validationErr);
   }
+
   if (!page) {
     try {
       const r = new URL(request.headers.get('referer') || '');
@@ -320,25 +321,32 @@ export async function handleAgentNote(request, env, bot, buildPayload) {
   }
   if (page) page = String(page).split('?')[0].split('#')[0].slice(0, 300);
 
+  const webBotAuth = await verifyWebBotAuth(request, (env && env._wbaOpts) || {});
   const base = await buildPayload(request, env, bot || null, 0, false);
-  const record = { ...base, path: '/agent-note', note, page: page || null };
+  const record = { ...base, path: '/agent-note', note, page: page || null, web_bot_auth: webBotAuth };
 
-  // Mode 1: standalone local D1 database
   if (env && env.DB) {
     try {
       const r = await saveAgentNote(env, record);
-      if (r.status === 201) return asText ? noteResp('Thanks, your note was received.\n', 201) : noteResp({ ok: true, message: 'Thanks, your note was received.' }, 201);
-      if (r.status === 429) return asText ? noteResp('rate limited, try again later\n', 429, { 'retry-after': '3600' }) : noteResp({ error: 'rate limited, try again later' }, 429, { 'retry-after': '3600' });
-      if (r.status === 400 || r.status === 413) return fail(r.status, r.error || 'invalid note');
-      return fail(503, 'unavailable');
+      if (r.status === 201) {
+        return asText
+          ? noteResp(`Thanks, your note was received. (receipt: ${r.receipt.receipt_id})\n`, 201)
+          : noteResp({ ok: true, message: 'Thanks, your note was received.', receipt: r.receipt }, 201);
+      }
+      if (r.status === 429) {
+        return asText
+          ? noteResp('rate limited, try again later\n', 429, { 'retry-after': '3600' })
+          : noteResp({ error: 'rate limited, try again later' }, 429, { 'retry-after': '3600' });
+      }
+      if (r.status === 400 || r.status === 413) return fail(r.status, { error: r.error || 'invalid note' });
+      return fail(503, { error: 'unavailable' });
     } catch (err) {
       console.error('agent-note D1 write failed', String((err && err.message) || err));
-      return fail(503, 'unavailable');
+      return fail(503, { error: 'unavailable' });
     }
   }
 
-  // Mode 2: forward to a separate analytics Worker
-  if (!env || !env.EDGE_TOKEN || !env.ANALYTICS_URL) return fail(503, 'unavailable');
+  if (!env || !env.EDGE_TOKEN || !env.ANALYTICS_URL) return fail(503, { error: 'unavailable' });
   try {
     const r = await fetch(String(env.ANALYTICS_URL).replace(/\/$/, '') + '/api/agent-note', {
       method: 'POST',
@@ -347,15 +355,14 @@ export async function handleAgentNote(request, env, bot, buildPayload) {
     });
     if (r.status === 201) return asText ? noteResp('Thanks, your note was received.\n', 201) : noteResp({ ok: true, message: 'Thanks, your note was received.' }, 201);
     if (r.status === 429) return asText ? noteResp('rate limited, try again later\n', 429, { 'retry-after': '3600' }) : noteResp({ error: 'rate limited, try again later' }, 429, { 'retry-after': '3600' });
-    if (r.status === 400 || r.status === 413) return fail(r.status, 'invalid note');
-    return fail(503, 'unavailable');
+    if (r.status === 400 || r.status === 413) return fail(r.status, { error: 'invalid note' });
+    return fail(503, { error: 'unavailable' });
   } catch (err) {
     console.error('agent-note forward failed', String((err && err.message) || err));
-    return fail(503, 'unavailable');
+    return fail(503, { error: 'unavailable' });
   }
 }
 
-/** Fire-and-forget event persistence (tag issued / tag reused / AI referral). Never throws. */
 export async function sendEvent(env, payload) {
   try {
     if (env && env.DB) {

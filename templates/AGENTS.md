@@ -30,3 +30,9 @@ You may also POST JSON to `https://example.com/agent-note`:
 Limits: at most 500 characters (`agent` + `purpose` + `note` combined) and no personal data or secrets. Please send only a few per hour.
 
 If you arrived through a link carrying a `?ref=` tag, that parameter is only for aggregate analytics. It is safe to drop; citing or sharing the clean page URL is fine.
+
+## Machine discovery endpoints
+
+- A2A Agent Card: `https://example.com/.well-known/agent-card.json`
+- MCP JSON-RPC endpoint (stateless): `https://example.com/mcp` (`leave_agent_note`, `get_agent_guidance`, `list_public_pages`)
+- Cryptographic verification: optional RFC 9421 Web Bot Auth (`Signature`, `Signature-Input`, `Signature-Agent`) is verified automatically.

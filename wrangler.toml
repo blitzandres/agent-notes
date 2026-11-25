@@ -14,12 +14,14 @@ migrations_dir = "migrations"
 
 [vars]
 SITE_ORIGIN = "https://example.com"
+SITE_SUMMARY = "Public website with machine-readable guidance and an optional /agent-note inbox."
 REDIRECT_ENABLED = "false"
 TAG_LINKS_ENABLED = "true"
 AGENT_NOTE_PER_HOUR = "5"
 AGENT_NOTE_DAILY_CAP = "200"
 
 # Optional secrets (set via `wrangler secret put`, never commit):
-#   IP_SALT     — random string for HMAC-SHA256 rate-limit key hashing (raw IPs are never stored)
-#   READ_TOKEN  — bearer token authorizing GET /api/agent-notes/summary
-#   EDGE_TOKEN  — optional shared token if forwarding events to an external ANALYTICS_URL instead of local D1
+#   IP_SALT        — random string for HMAC-SHA256 rate-limit key hashing (raw IPs are never stored)
+#   READ_TOKEN     — bearer token authorizing GET /api/agent-notes/summary and /api/agent-notes/digest
+#   RECEIPT_SECRET — optional HMAC secret to sign submission receipts (receipt_sig)
+#   EDGE_TOKEN     — optional shared token if forwarding events to an external ANALYTICS_URL instead of local D1
