@@ -1,0 +1,11 @@
+# Example Site
+
+> Brief description of what this site publishes and how AI assistants should cite it.
+
+- Agent guidance & optional `/agent-note` inbox: https://example.com/AGENTS.md
+- Canonical site: https://example.com/
+
+## Key pages
+
+- [Home](https://example.com/): overview and primary navigation
+- [Docs](https://example.com/docs/): documentation and guides
